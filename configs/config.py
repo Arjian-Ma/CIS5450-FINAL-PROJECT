@@ -15,6 +15,7 @@ RAW_GAMELIST_PATH  = DATA_DIR / "games-list.csv"
 
 PROCESSED_PATH     = OUTPUT_DIR / "processed.parquet"
 FEATURES_PATH      = OUTPUT_DIR / "features.parquet"
+MODELS_DIR         = ROOT_DIR / "Models"
 
 # ── Model framing ──────────────────────────────────────────────────────────────
 # True  → post-release explanatory model (uses playtime, review counts, etc.)
@@ -46,6 +47,9 @@ POST_RELEASE_FEATURES = [
     "Median playtime two weeks",
     "Peak CCU",
     "estimated_owners_midpoint",   # Kaggle range estimate, also post-release
+    "reviewScore",                 # Gamalytic review score, post-release
+    "Metacritic score",            # Metacritic score, post-release
+    "has_metacritic",              # derived from Metacritic score, also post-release
 ]
 
 # Columns dropped before any modelling — URLs, near-constant, or irrelevant text

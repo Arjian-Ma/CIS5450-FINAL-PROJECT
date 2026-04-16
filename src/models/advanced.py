@@ -1,24 +1,13 @@
 """
 src/models/advanced.py
 ──────────────────────
-Framework stubs for flexible tree-based models.
+Tree-based models for Steam sales prediction.
 
 Models
 ──────
-  RandomForestModel   – ensemble of decision trees, handles non-linearity and
-                        interactions (e.g. price × genre, publisher × review_ratio)
-  GradientBoostModel  – sklearn GradientBoostingRegressor (fallback if XGBoost
-                        is not installed)
-  XGBoostModel        – XGBoost, typically the best-performing model here
-
-All classes follow the same BaselineModel interface from src.models.baseline,
-so they slot into run_all_baselines()-style evaluation loops.
-
-Status
-──────
-  The class skeletons, __init__ signatures, and method stubs are complete.
-  TODO markers show exactly what needs to be filled in during the modelling
-  phase of the project.
+  RandomForestModel   – ensemble of decision trees; OOB score as quality proxy
+  GradientBoostModel  – sklearn GradientBoostingRegressor with staged loss curve
+  XGBoostModel        – XGBoost with early stopping and full loss curve
 """
 from __future__ import annotations
 
@@ -26,11 +15,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.metrics import root_mean_squared_error
 
-from configs.config import RF_PARAMS, XGB_PARAMS, RANDOM_STATE
+from configs.config import RF_PARAMS, XGB_PARAMS, RANDOM_STATE, MODELS_DIR
 from src.evaluation.metrics import evaluate_predictions
 
 logger = logging.getLogger(__name__)
@@ -49,14 +41,9 @@ class AdvancedModel:
     val_metrics:   dict = field(default_factory=dict)
     test_metrics:  dict = field(default_factory=dict)
     feature_importances_: np.ndarray | None = field(default=None, repr=False)
+    loss_curve_: dict | None = field(default=None, repr=False)
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, **fit_kwargs) -> "AdvancedModel":
-        """
-        Fit the model.  Subclasses may override to add early stopping or
-        sample-weight logic.
-        """
-        # TODO: add sample weights if you want to up-weight mid-tier games
-        #       (to counteract AAA games dominating MSE)
         self.model.fit(X_train, y_train, **fit_kwargs)
         if hasattr(self.model, "feature_importances_"):
             self.feature_importances_ = self.model.feature_importances_
@@ -82,7 +69,6 @@ class AdvancedModel:
         return metrics
 
     def feature_importance_df(self, feature_names: list[str], top_n: int = 30) -> pd.DataFrame:
-        """Return sorted feature importance DataFrame (requires model to have been fit)."""
         if self.feature_importances_ is None:
             raise RuntimeError(f"Model {self.name} has not been fitted yet.")
         df = pd.DataFrame({
@@ -90,6 +76,40 @@ class AdvancedModel:
             "importance": self.feature_importances_,
         }).sort_values("importance", ascending=False).reset_index(drop=True)
         return df.head(top_n)
+
+    def save(self, path=None) -> str:
+        """Save model to models/ directory using joblib. Returns the saved path."""
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        save_path = path or MODELS_DIR / f"{self.name}.joblib"
+        joblib.dump(self, save_path)
+        print(f"[{self.name}] saved → {save_path}")
+        return str(save_path)
+
+    @classmethod
+    def load(cls, path) -> "AdvancedModel":
+        """Load a saved model from disk."""
+        return joblib.load(path)
+
+    def plot_loss_curve(self, ax=None) -> None:
+        """Plot train/val loss curve if available for this model."""
+        if self.loss_curve_ is None:
+            print(f"{self.name}: no loss curve available.")
+            return
+        if ax is None:
+            _, ax = plt.subplots(figsize=(9, 4))
+        if "train" in self.loss_curve_:
+            ax.plot(self.loss_curve_["train"], label="train RMSE")
+        if "val" in self.loss_curve_:
+            ax.plot(self.loss_curve_["val"], label="val RMSE")
+        if "best_iteration" in self.loss_curve_:
+            ax.axvline(self.loss_curve_["best_iteration"], color="red",
+                       linestyle="--", label=f"best iter={self.loss_curve_['best_iteration']}")
+        ax.set_xlabel("Iteration / tree")
+        ax.set_ylabel("RMSE (log scale)")
+        ax.set_title(f"{self.name} — loss curve")
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,43 +120,48 @@ class RandomForestModel(AdvancedModel):
     """
     Random Forest regressor.
 
-    Strengths for this dataset
-    ─────────────────────────
-    - Handles non-linear interactions natively (price × genre, publisher × score)
-    - Robust to outliers in features
-    - Built-in feature importance via mean decrease in impurity
-
-    Known limitations
-    ─────────────────
-    - Does not extrapolate beyond the training range of copiesSold
-    - Can over-fit on very high-cardinality encoded features if tree depth
-      is unconstrained
+    Loss curve: not applicable — trees are built independently so there is no
+    iterative loss to track. OOB (out-of-bag) RMSE is stored in oob_rmse_ as
+    the closest quality proxy.
     """
 
     def __init__(self, **rf_params):
         params = {**RF_PARAMS, **rf_params}
+        params.setdefault("oob_score", True)   # enables oob_score_ after fit
         super().__init__(
             name="RandomForest",
             model=RandomForestRegressor(**params),
         )
+        self.oob_rmse_: float | None = None
 
-    # TODO (modelling phase):
-    #   1. Run a grid / random search over n_estimators, max_depth,
-    #      min_samples_leaf using the validation set.
-    #   2. Consider max_features='sqrt' vs 'log2' for high-dim feature matrices.
-    #   3. Evaluate permutation importance (not just impurity importance) to get
-    #      unbiased estimates on correlated features.
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, **fit_kwargs) -> "RandomForestModel":
+        super().fit(X_train, y_train, **fit_kwargs)
+        if hasattr(self.model, "oob_score_"):
+            # oob_score_ is R², convert to RMSE via residuals
+            y_oob = self.model.oob_prediction_
+            self.oob_rmse_ = float(root_mean_squared_error(y_train, y_oob))
+            logger.info("RandomForest OOB RMSE (log): %.4f", self.oob_rmse_)
+        return self
+
+    def plot_loss_curve(self, ax=None) -> None:
+        if self.oob_rmse_ is None:
+            print("RandomForest: fit the model first.")
+            return
+        print(
+            f"RandomForest has no iterative loss curve.\n"
+            f"OOB RMSE (log scale): {self.oob_rmse_:.4f}\n"
+            f"OOB R²: {self.model.oob_score_:.4f}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gradient Boosting (sklearn fallback)
+# Gradient Boosting (sklearn)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GradientBoostModel(AdvancedModel):
     """
-    sklearn GradientBoostingRegressor.
-    Slower than XGBoost but requires no extra dependency.
-    Use this as a fallback or for cross-validation when XGBoost is unavailable.
+    sklearn GradientBoostingRegressor with per-iteration train/val loss curve
+    computed via staged_predict().
     """
 
     def __init__(self, **gb_params):
@@ -153,10 +178,33 @@ class GradientBoostModel(AdvancedModel):
             model=GradientBoostingRegressor(**params),
         )
 
-    # TODO (modelling phase):
-    #   1. Use staged_predict() to find the optimal n_estimators without
-    #      overfitting on the validation set.
-    #   2. Compare against XGBoostModel on val RMSE.
+    def fit(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray | None = None,
+        y_val: np.ndarray | None = None,
+        **fit_kwargs,
+    ) -> "GradientBoostModel":
+        self.model.fit(X_train, y_train, **fit_kwargs)
+        self.feature_importances_ = self.model.feature_importances_
+
+        # Build loss curve using staged_predict
+        train_rmse, val_rmse = [], []
+        for y_pred_train in self.model.staged_predict(X_train):
+            train_rmse.append(root_mean_squared_error(y_train, y_pred_train))
+        if X_val is not None and y_val is not None:
+            for y_pred_val in self.model.staged_predict(X_val):
+                val_rmse.append(root_mean_squared_error(y_val, y_pred_val))
+
+        self.loss_curve_ = {"train": train_rmse}
+        if val_rmse:
+            self.loss_curve_["val"] = val_rmse
+            best = int(np.argmin(val_rmse))
+            self.loss_curve_["best_iteration"] = best
+            logger.info("GradientBoosting best val RMSE %.4f at iteration %d", val_rmse[best], best)
+
+        return self
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,27 +213,20 @@ class GradientBoostModel(AdvancedModel):
 
 class XGBoostModel(AdvancedModel):
     """
-    XGBoost gradient-boosted trees.
-
-    Expected to be the best-performing model here because it can capture:
-      - Price effects that differ across genres
-      - Review score interactions with free-to-play status
-      - Publisher reputation × follower count
-
+    XGBoost gradient-boosted trees with early stopping and full loss curve.
     Requires:  pip install xgboost
     """
 
-    def __init__(self, **xgb_params):
+    def __init__(self, early_stopping_rounds: int = 50, **xgb_params):
         try:
             from xgboost import XGBRegressor
         except ImportError as e:
-            raise ImportError(
-                "XGBoost is not installed. Run: pip install xgboost"
-            ) from e
+            raise ImportError("XGBoost is not installed. Run: pip install xgboost") from e
 
         params = {**XGB_PARAMS, **xgb_params}
-        params.pop("random_state", None)            # XGBRegressor uses 'seed'
+        params.pop("random_state", None)
         params["seed"] = RANDOM_STATE
+        self._early_stopping_rounds = early_stopping_rounds
         super().__init__(name="XGBoost", model=XGBRegressor(**params))
 
     def fit(
@@ -194,55 +235,52 @@ class XGBoostModel(AdvancedModel):
         y_train: np.ndarray,
         X_val: np.ndarray | None = None,
         y_val: np.ndarray | None = None,
-        early_stopping_rounds: int = 50,
         verbose: bool = False,
     ) -> "XGBoostModel":
-        """
-        Fit with optional early stopping on the validation set.
+        fit_kwargs: dict = {}
+        if X_val is not None and y_val is not None:
+            self.model.early_stopping_rounds = self._early_stopping_rounds
+            fit_kwargs["eval_set"] = [(X_train, y_train), (X_val, y_val)]
+            fit_kwargs["verbose"] = verbose
+        else:
+            self.model.early_stopping_rounds = None
 
-        Parameters
-        ----------
-        X_val, y_val          : Validation data for early stopping.
-                                If None, no early stopping is used.
-        early_stopping_rounds : Stop if val score doesn't improve for N rounds.
-        """
-        # TODO (modelling phase): implement early stopping
-        #   fit_kwargs = {}
-        #   if X_val is not None:
-        #       fit_kwargs["eval_set"] = [(X_val, y_val)]
-        #       fit_kwargs["early_stopping_rounds"] = early_stopping_rounds
-        #       fit_kwargs["verbose"] = verbose
-        #   self.model.fit(X_train, y_train, **fit_kwargs)
-
-        self.model.fit(X_train, y_train)
+        self.model.fit(X_train, y_train, **fit_kwargs)
         self.feature_importances_ = self.model.feature_importances_
-        return self
 
-    # TODO (modelling phase):
-    #   1. Tune learning_rate, max_depth, subsample, colsample_bytree via
-    #      Optuna or sklearn RandomizedSearchCV.
-    #   2. Try training on raw copiesSold with a custom objective (e.g. RMSLE)
-    #      instead of log-transforming the target manually.
-    #   3. Use SHAP values (pip install shap) for model explainability — see
-    #      notebooks/03_modeling.ipynb for the planned SHAP section.
+        # Store loss curve from evals_result_ (only available when eval_set was passed)
+        evals = self.model.evals_result() if fit_kwargs.get("eval_set") else {}
+        if evals:
+            metric = list(list(evals.values())[0].keys())[0]
+            sets   = list(evals.keys())
+            self.loss_curve_ = {
+                "train": evals[sets[0]][metric],
+            }
+            if len(sets) > 1:
+                self.loss_curve_["val"] = evals[sets[1]][metric]
+                best = int(self.model.best_iteration)
+                self.loss_curve_["best_iteration"] = best
+                logger.info("XGBoost early stopped at iteration %d", best)
+
+        return self
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Convenience runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_advanced_models(data: dict, *, use_xgboost: bool = True) -> pd.DataFrame:
+def run_advanced_models(
+    data: dict, *, use_xgboost: bool = True, save: bool = False
+) -> tuple[pd.DataFrame, dict[str, AdvancedModel]]:
     """
-    Train all advanced models and return a comparison DataFrame.
-
-    Parameters
-    ----------
-    data         : dict from src.features.engineer.prepare_features()
-    use_xgboost  : If False, skip XGBoost (e.g. not installed in environment)
+    Train all advanced models and return a comparison DataFrame and fitted models.
 
     Returns
     -------
-    summary_df : DataFrame indexed by model name
+    summary  : DataFrame of metrics per model
+    models   : dict mapping model name → fitted model object
+               e.g. models["XGBoost"].plot_loss_curve()
+                    models["RandomForest"].feature_importance_df(feature_names)
     """
     X_train, X_val, X_test = data["X_train"], data["X_val"], data["X_test"]
     y_train, y_val, y_test = data["y_train"], data["y_val"], data["y_test"]
@@ -259,12 +297,19 @@ def run_advanced_models(data: dict, *, use_xgboost: bool = True) -> pd.DataFrame
 
     records = []
     for m in models:
-        logger.info("Fitting %s …", m.name)
-        m.fit(X_train, y_train)
+        print(f"[{m.name}] training started …")
+        if isinstance(m, (GradientBoostModel, XGBoostModel)):
+            m.fit(X_train, y_train, X_val=X_val, y_val=y_val)
+        else:
+            m.fit(X_train, y_train)
 
         tr  = m.evaluate(X_train, y_train, "train")
         val = m.evaluate(X_val,   y_val,   "val")
         tst = m.evaluate(X_test,  y_test,  "test")
+
+        print(f"[{m.name}] done — val RMSE(log)={val['rmse_log']:.4f}  val R²={val['r2_log']:.4f}")
+        if save:
+            m.save()
 
         records.append({
             "model":          m.name,
@@ -276,9 +321,7 @@ def run_advanced_models(data: dict, *, use_xgboost: bool = True) -> pd.DataFrame
             "val_RMSE_raw":   val["rmse_raw"],
             "val_MAE_raw":    val["mae_raw"],
         })
-        logger.info(
-            "  %-25s  val RMSE(log)=%.4f  val R²=%.4f",
-            m.name, val["rmse_log"], val["r2_log"],
-        )
 
-    return pd.DataFrame(records).set_index("model")
+    summary = pd.DataFrame(records).set_index("model")
+    fitted  = {m.name: m for m in models}
+    return summary, fitted
