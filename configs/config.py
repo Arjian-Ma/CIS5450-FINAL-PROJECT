@@ -19,7 +19,7 @@ FEATURES_PATH      = OUTPUT_DIR / "features.parquet"
 # ── Model framing ──────────────────────────────────────────────────────────────
 # True  → post-release explanatory model (uses playtime, review counts, etc.)
 # False → launch-time prediction model  (only pre-release / at-launch features)
-POST_RELEASE_MODEL: bool = True
+POST_RELEASE_MODEL: bool = False
 
 # ── Target ─────────────────────────────────────────────────────────────────────
 TARGET_RAW = "copiesSold"
@@ -46,6 +46,9 @@ POST_RELEASE_FEATURES = [
     "Median playtime two weeks",
     "Peak CCU",
     "estimated_owners_midpoint",   # Kaggle range estimate, also post-release
+    "reviewScore",
+    "Metacritic score",
+    "has_metacritic",
 ]
 
 # Columns dropped before any modelling — URLs, near-constant, or irrelevant text
