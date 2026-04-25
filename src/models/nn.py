@@ -126,6 +126,9 @@ class NeuralNetModel:
     max_epochs    : Maximum training epochs.
     patience      : Early-stopping patience (epochs without val improvement).
     device        : 'cpu', 'cuda', or 'mps' (auto-detected if None).
+    use_log_target: If False, targets are raw copiesSold. The model internally
+                    scales y by y_scale for numerical stability and denormalises
+                    predictions at inference time.
     """
 
     name: str = "NeuralNet"
@@ -137,6 +140,7 @@ class NeuralNetModel:
     max_epochs: int = 100
     patience: int = 10
     device: Optional[str] = None
+    use_log_target: bool = False   # set True if y is log1p(copiesSold)
 
     # Populated after fitting
     train_metrics: dict = field(default_factory=dict)
@@ -147,6 +151,7 @@ class NeuralNetModel:
     # Internal — not part of the public API
     _net: Optional["nn.Module"] = field(default=None, repr=False, init=False)
     _input_dim: Optional[int] = field(default=None, repr=False, init=False)
+    _y_scale: float = field(default=1.0, repr=False, init=False)  # internal scaling factor
 
     # ── Device resolution ─────────────────────────────────────────────────────
 
@@ -187,6 +192,18 @@ class NeuralNetModel:
         dev = self._resolve_device()
         self._input_dim = X_train.shape[1]
 
+        # ── Internal target scaling for raw copiesSold ─────────────────────
+        # Raw copiesSold reaches 343M — dividing by the training mean keeps
+        # values near 1.0 so MSE loss and gradients stay numerically stable.
+        y_arr = np.asarray(y_train, dtype=np.float64)
+        if not self.use_log_target:
+            self._y_scale = float(np.mean(y_arr[y_arr > 0])) or 1.0
+        else:
+            self._y_scale = 1.0
+
+        def _scale(y):
+            return np.asarray(y, dtype=np.float64) / self._y_scale
+
         # Build network
         self._net = _build_mlp(
             input_dim=self._input_dim,
@@ -195,10 +212,10 @@ class NeuralNetModel:
             batch_norm=self.batch_norm,
         ).to(dev)
 
-        # Convert to tensors
+        # Convert to tensors (scale y if using raw target)
         def _to_tensor(X, y):
-            Xt = torch.tensor(X, dtype=torch.float32).to(dev)
-            yt = torch.tensor(np.asarray(y), dtype=torch.float32).view(-1, 1).to(dev)
+            Xt = torch.tensor(np.asarray(X), dtype=torch.float32).to(dev)
+            yt = torch.tensor(_scale(y), dtype=torch.float32).view(-1, 1).to(dev)
             return Xt, yt
 
         Xt_train, yt_train = _to_tensor(X_train, y_train)
@@ -232,6 +249,8 @@ class NeuralNetModel:
                 pred = self._net(Xb)
                 loss = criterion(pred, yb)
                 loss.backward()
+                # Gradient clipping — prevents exploding gradients on raw scale
+                torch.nn.utils.clip_grad_norm_(self._net.parameters(), max_norm=1.0)
                 optimizer.step()
                 batch_losses.append(loss.item())
 
@@ -296,14 +315,22 @@ class NeuralNetModel:
     # ── Predict ───────────────────────────────────────────────────────────────
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Return predicted log_copies_sold as a numpy array."""
+        """
+        Return predictions in the original target scale (copies sold or
+        log_copies_sold depending on use_log_target).
+        """
         if self._net is None:
             raise RuntimeError(f"Model '{self.name}' has not been fitted yet.")
         dev = self._resolve_device()
         self._net.eval()
-        Xt = torch.tensor(X, dtype=torch.float32).to(dev)
+        Xt = torch.tensor(np.asarray(X), dtype=torch.float32).to(dev)
         with torch.no_grad():
             preds = self._net(Xt).cpu().numpy().flatten()
+        # Denormalise back to original scale
+        preds = preds * self._y_scale
+        # Clip negatives — copies sold can't be negative
+        if not self.use_log_target:
+            preds = np.clip(preds, 0, None)
         return preds
 
     # ── Evaluate ──────────────────────────────────────────────────────────────
@@ -315,22 +342,44 @@ class NeuralNetModel:
         split_name: str = "val",
     ) -> dict:
         """
-        Compute RMSE / MAE / R² on both log and raw scales.
+        Compute RMSE / MAE / R² on the target scale.
+
+        When use_log_target=False (raw copiesSold), metrics are computed
+        directly on raw scale without any log transformation.
+        When use_log_target=True, delegates to evaluate_predictions which
+        also returns inverse-transformed raw-scale metrics.
 
         Parameters
         ----------
         X          : Feature matrix.
-        y          : Ground-truth log_copies_sold values.
+        y          : Ground-truth target values (raw or log depending on flag).
         split_name : One of 'train', 'val', 'test' — stored on the model.
-
-        Returns
-        -------
-        metrics dict (see src.evaluation.metrics.evaluate_predictions).
         """
-        y_pred_log = self.predict(X)
-        metrics = evaluate_predictions(
-            np.asarray(y), y_pred_log, model_name=self.name
-        )
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+        y_pred = self.predict(X)
+        y_true = np.asarray(y, dtype=np.float64)
+
+        if self.use_log_target:
+            # y is log1p(copiesSold) — use the shared evaluate_predictions
+            metrics = evaluate_predictions(y_true, y_pred, model_name=self.name)
+        else:
+            # y is raw copiesSold — compute metrics directly on raw scale
+            rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+            mae  = float(mean_absolute_error(y_true, y_pred))
+            r2   = float(r2_score(y_true, y_pred))
+            metrics = dict(
+                rmse_log=rmse,   # key name kept for compatibility with runner
+                mae_log=mae,
+                r2_log=r2,
+                rmse_raw=rmse,
+                mae_raw=mae,
+            )
+            logger.debug(
+                "[%s]  RMSE=%.0f  MAE=%.0f  R²=%.4f",
+                self.name, rmse, mae, r2,
+            )
+
         if split_name == "train":
             self.train_metrics = metrics
         elif split_name == "val":
@@ -367,7 +416,6 @@ class NeuralNetModel:
 
 NN_CONFIGS: dict[str, dict] = {
     # ── NN1: Shallow — 2 hidden layers ───────────────────────────────────────
-    # Quick baseline for neural networks. Trains fastest; good sanity check.
     "NN1_Shallow": dict(
         name="NN1_Shallow",
         hidden_layers=[256, 128],
@@ -377,9 +425,9 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
+        use_log_target=False,
     ),
     # ── NN2: Medium — 3 hidden layers ────────────────────────────────────────
-    # Adds one more layer to learn richer feature interactions.
     "NN2_Medium": dict(
         name="NN2_Medium",
         hidden_layers=[512, 256, 128],
@@ -389,9 +437,9 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
+        use_log_target=False,
     ),
     # ── NN3: Deep — 4 hidden layers ──────────────────────────────────────────
-    # Deeper network; captures more hierarchical representations.
     "NN3_Deep": dict(
         name="NN3_Deep",
         hidden_layers=[512, 256, 128, 64],
@@ -401,9 +449,9 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=150,
         patience=15,
+        use_log_target=False,
     ),
     # ── NN4: Wide — 3 wide hidden layers ─────────────────────────────────────
-    # Prioritises width over depth; may capture many parallel feature signals.
     "NN4_Wide": dict(
         name="NN4_Wide",
         hidden_layers=[1024, 512, 256],
@@ -413,10 +461,9 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
+        use_log_target=False,
     ),
     # ── NN5: Deep + Dropout — 5 hidden layers with regularisation ────────────
-    # Deepest model; Dropout (p=0.3) reduces over-fitting on the noisy target.
-    # BatchNorm stabilises training through the extra depth.
     "NN5_DeepDrop": dict(
         name="NN5_DeepDrop",
         hidden_layers=[512, 256, 128, 64, 32],
@@ -426,6 +473,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=256,
         max_epochs=200,
         patience=20,
+        use_log_target=False,
     ),
 }
 
