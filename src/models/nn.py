@@ -554,12 +554,14 @@ def run_nn_models(
                 "val_MAE_log":    round(val["mae_log"],  4),
                 "val_R2_log":     round(val["r2_log"],   4),
                 "val_RMSE_raw":   round(val["rmse_raw"], 0),
+                "val_MAE_raw":    round(val["mae_raw"],  0),
+                "test_MAE_raw":   round(tst["mae_raw"],  0),
             }
         )
 
         logger.info(
-            "  %-20s  val RMSE(log)=%.4f  val R²=%.4f",
-            model.name, val["rmse_log"], val["r2_log"],
+            "  %-20s  val RMSE=%.0f  val MAE=%.0f  val R²=%.4f",
+            model.name, val["rmse_raw"], val["mae_raw"], val["r2_log"],
         )
 
     return pd.DataFrame(records).set_index("model")
