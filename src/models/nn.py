@@ -425,7 +425,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
-        use_log_target=False,
+        use_log_target=True,
     ),
     # ── NN2: Medium — 3 hidden layers ────────────────────────────────────────
     "NN2_Medium": dict(
@@ -437,7 +437,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
-        use_log_target=False,
+        use_log_target=True,
     ),
     # ── NN3: Deep — 4 hidden layers ──────────────────────────────────────────
     "NN3_Deep": dict(
@@ -449,7 +449,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=150,
         patience=15,
-        use_log_target=False,
+        use_log_target=True,
     ),
     # ── NN4: Wide — 3 wide hidden layers ─────────────────────────────────────
     "NN4_Wide": dict(
@@ -461,7 +461,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=512,
         max_epochs=100,
         patience=10,
-        use_log_target=False,
+        use_log_target=True,
     ),
     # ── NN5: Deep + Dropout — 5 hidden layers with regularisation ────────────
     "NN5_DeepDrop": dict(
@@ -473,7 +473,7 @@ NN_CONFIGS: dict[str, dict] = {
         batch_size=256,
         max_epochs=200,
         patience=20,
-        use_log_target=False,
+        use_log_target=True,
     ),
 }
 
