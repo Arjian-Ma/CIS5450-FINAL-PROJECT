@@ -20,7 +20,14 @@ MODELS_DIR         = ROOT_DIR / "Models"
 # ── Model framing ──────────────────────────────────────────────────────────────
 # True  → post-release explanatory model (uses playtime, review counts, etc.)
 # False → launch-time prediction model  (only pre-release / at-launch features)
-POST_RELEASE_MODEL: bool = True
+#
+# Set to False because the preprocessing notebook calls
+# `run_preprocessing_pipeline(post_release=False)`, which drops the 14
+# post-release columns before they ever hit `processed.parquet`. Keeping this
+# flag True caused downstream code to mislabel runs as "postrelease" even
+# though the leaky features were already gone. If you regenerate the parquet
+# with `post_release=True`, flip this back.
+POST_RELEASE_MODEL: bool = False
 
 # ── Target ─────────────────────────────────────────────────────────────────────
 TARGET_RAW = "copiesSold"

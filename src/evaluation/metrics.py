@@ -28,42 +28,57 @@ logger = logging.getLogger(__name__)
 # ── Core metric computation ────────────────────────────────────────────────────
 
 def evaluate_predictions(
-    y_true_log: np.ndarray,
-    y_pred_log: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
     *,
+    target_scale: str = "log",
     model_name: str = "",
 ) -> dict:
     """
     Compute RMSE, MAE, and R² on both the log scale and the original copies-sold
-    scale.
+    scale, regardless of which scale the model was trained on. This lets you
+    compare a log-target model and a raw-target model on the same yardstick.
 
     Parameters
     ----------
-    y_true_log : Ground-truth values in log1p space.
-    y_pred_log : Predicted values in log1p space.
-    model_name : Optional label (used in log messages only).
+    y_true       : Ground-truth values, in `target_scale` units.
+    y_pred       : Predicted values, in `target_scale` units.
+    target_scale : "log" if y_true / y_pred are log1p(copiesSold);
+                   "raw" if they are raw copiesSold.
+    model_name   : Optional label (used in log messages only).
 
     Returns
     -------
-    dict with keys:
-        rmse_log, mae_log, r2_log
-        rmse_raw, mae_raw
-        (No R² on raw scale: MSE is dominated by blockbuster outliers and the
-         raw R² is not a meaningful comparator across differently-scaled models.)
-    """
-    y_true_log = np.asarray(y_true_log, dtype=float)
-    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    dict with keys: rmse_log, mae_log, r2_log, rmse_raw, mae_raw.
+    (No R² on the raw scale — it's dominated by blockbuster outliers and
+     not meaningful for comparing differently-scaled models.)
 
-    # Log-scale metrics
+    Notes
+    -----
+    For a raw-trained model whose predictions can go negative, both scales
+    are computed by clipping predictions to [0, ∞) before applying log1p.
+    Raw-scale metrics are unaffected by the clip.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    if target_scale == "log":
+        y_true_log, y_pred_log = y_true, y_pred
+        y_true_raw = np.expm1(y_true)
+        y_pred_raw = np.expm1(y_pred)
+    elif target_scale == "raw":
+        y_true_raw, y_pred_raw = y_true, y_pred
+        y_true_log = np.log1p(np.clip(y_true, 0, None))
+        y_pred_log = np.log1p(np.clip(y_pred, 0, None))
+    else:
+        raise ValueError(f"target_scale must be 'log' or 'raw', got {target_scale!r}")
+
     rmse_log = float(np.sqrt(mean_squared_error(y_true_log, y_pred_log)))
     mae_log  = float(mean_absolute_error(y_true_log, y_pred_log))
     r2_log   = float(r2_score(y_true_log, y_pred_log))
 
-    # Raw-scale metrics (inverse transform)
-    y_true_raw = np.expm1(y_true_log)
-    y_pred_raw = np.expm1(y_pred_log)
-    rmse_raw   = float(np.sqrt(mean_squared_error(y_true_raw, y_pred_raw)))
-    mae_raw    = float(mean_absolute_error(y_true_raw, y_pred_raw))
+    rmse_raw = float(np.sqrt(mean_squared_error(y_true_raw, y_pred_raw)))
+    mae_raw  = float(mean_absolute_error(y_true_raw, y_pred_raw))
 
     metrics = dict(
         rmse_log=rmse_log,
@@ -76,8 +91,8 @@ def evaluate_predictions(
     if model_name:
         logger.debug(
             "[%s]  RMSE_log=%.4f  MAE_log=%.4f  R²_log=%.4f  "
-            "RMSE_raw=%.0f  MAE_raw=%.0f",
-            model_name, rmse_log, mae_log, r2_log, rmse_raw, mae_raw,
+            "RMSE_raw=%.0f  MAE_raw=%.0f  (trained on %s)",
+            model_name, rmse_log, mae_log, r2_log, rmse_raw, mae_raw, target_scale,
         )
 
     return metrics

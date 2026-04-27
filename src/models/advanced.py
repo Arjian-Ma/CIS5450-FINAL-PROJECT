@@ -37,6 +37,7 @@ class AdvancedModel:
     """Common interface for all advanced models."""
     name: str
     model: Any
+    target_scale: str = "log"   # "log" if trained on log1p target, "raw" if on copiesSold
     train_metrics: dict = field(default_factory=dict)
     val_metrics:   dict = field(default_factory=dict)
     test_metrics:  dict = field(default_factory=dict)
@@ -58,8 +59,12 @@ class AdvancedModel:
         y: np.ndarray | pd.Series,
         split_name: str = "val",
     ) -> dict:
-        y_pred_log = self.predict(X)
-        metrics = evaluate_predictions(np.asarray(y), y_pred_log, model_name=self.name)
+        y_pred = self.predict(X)
+        metrics = evaluate_predictions(
+            np.asarray(y), y_pred,
+            target_scale=self.target_scale,
+            model_name=self.name,
+        )
         if split_name == "train":
             self.train_metrics = metrics
         elif split_name == "val":
