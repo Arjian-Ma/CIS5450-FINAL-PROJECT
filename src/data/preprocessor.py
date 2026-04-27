@@ -76,6 +76,7 @@ def run_preprocessing_pipeline(
         ("drop useless columns",        lambda d: drop_useless_columns(d)),
         ("drop target nulls",           lambda d: drop_target_nulls(d)),
         ("parse release date",          lambda d: parse_release_date(d)),
+        ("compute game age",            lambda d: compute_game_age(d)),
         ("parse supported languages",   lambda d: parse_language_count(d)),
         ("parse estimated owners",      lambda d: parse_estimated_owners(d)),
         ("parse genres",                lambda d: parse_genres(d)),
@@ -163,6 +164,28 @@ def parse_release_date(df: pd.DataFrame) -> pd.DataFrame:
     df = df.drop(columns=["firstReleaseDate", "Release date"], errors="ignore")
 
     logger.debug("release_year null count: %d", df["release_year"].isna().sum())
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 3b — Game age (time-since-release control)
+# ─────────────────────────────────────────────────────────────────────────────
+
+REFERENCE_YEAR = 2026  # snapshot year — older games have had more time to accrue sales
+
+def compute_game_age(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add `game_age` = REFERENCE_YEAR - release_year.
+
+    Controls for the simple fact that older games have had more years on the
+    market to accumulate sales. Without this, the model conflates "old" with
+    "popular" and unfairly penalises recent releases. Clipped at 0 so any
+    future-dated entries don't produce negative ages.
+    """
+    df = df.copy()
+    df["game_age"] = (
+        (REFERENCE_YEAR - df["release_year"]).clip(lower=0).astype("Int16")
+    )
     return df
 
 

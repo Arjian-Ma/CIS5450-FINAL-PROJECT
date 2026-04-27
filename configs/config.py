@@ -15,11 +15,19 @@ RAW_GAMELIST_PATH  = DATA_DIR / "games-list.csv"
 
 PROCESSED_PATH     = OUTPUT_DIR / "processed.parquet"
 FEATURES_PATH      = OUTPUT_DIR / "features.parquet"
+MODELS_DIR         = ROOT_DIR / "Models"
 
 # ── Model framing ──────────────────────────────────────────────────────────────
 # True  → post-release explanatory model (uses playtime, review counts, etc.)
 # False → launch-time prediction model  (only pre-release / at-launch features)
-POST_RELEASE_MODEL: bool = True
+#
+# Set to False because the preprocessing notebook calls
+# `run_preprocessing_pipeline(post_release=False)`, which drops the 14
+# post-release columns before they ever hit `processed.parquet`. Keeping this
+# flag True caused downstream code to mislabel runs as "postrelease" even
+# though the leaky features were already gone. If you regenerate the parquet
+# with `post_release=True`, flip this back.
+POST_RELEASE_MODEL: bool = False
 
 # ── Target ─────────────────────────────────────────────────────────────────────
 TARGET_RAW = "copiesSold"
@@ -46,6 +54,9 @@ POST_RELEASE_FEATURES = [
     "Median playtime two weeks",
     "Peak CCU",
     "estimated_owners_midpoint",   # Kaggle range estimate, also post-release
+    "reviewScore",                 # Gamalytic review score, post-release
+    "Metacritic score",            # Metacritic score, post-release
+    "has_metacritic",              # derived from Metacritic score, also post-release
 ]
 
 # Columns dropped before any modelling — URLs, near-constant, or irrelevant text

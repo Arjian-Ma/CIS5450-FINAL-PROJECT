@@ -55,21 +55,32 @@ def get_feature_columns(
     df: pd.DataFrame,
     *,
     post_release: bool = POST_RELEASE_MODEL,
+    use_game_age: bool = True,
+    use_release_year: bool = True,
 ) -> list[str]:
     """
     Return the list of feature columns to use, respecting the model framing.
 
     In post-release mode   → all non-metadata, non-target columns are features.
     In launch-time mode    → post-release columns are additionally excluded.
+    use_game_age=False     → drops `game_age`.
+    use_release_year=False → drops `release_year`.
+
+    Both flags exist so we can A/B test: release_year only, game_age only, or both.
     """
     excluded = set(NON_FEATURE_COLS)
     if not post_release:
         excluded.update(POST_RELEASE_FEATURES)
+    if not use_game_age:
+        excluded.add("game_age")
+    if not use_release_year:
+        excluded.add("release_year")
 
     feature_cols = [c for c in df.columns if c not in excluded]
-    logger.info("Feature matrix: %d columns (%s mode)",
+    logger.info("Feature matrix: %d columns (%s mode, game_age=%s, release_year=%s)",
                 len(feature_cols),
-                "post-release" if post_release else "launch-time")
+                "post-release" if post_release else "launch-time",
+                use_game_age, use_release_year)
     return feature_cols
 
 
@@ -196,6 +207,8 @@ def prepare_features(
     *,
     target_col: str = TARGET_LOG,
     post_release: bool = POST_RELEASE_MODEL,
+    use_game_age: bool = True,
+    use_release_year: bool = True,
     return_pipeline: bool = False,
 ) -> dict:
     """
@@ -209,7 +222,12 @@ def prepare_features(
         output_cols                         (list after ColumnTransformer)
         pipeline                            (fitted ColumnTransformer, if return_pipeline=True)
     """
-    feature_cols = get_feature_columns(df, post_release=post_release)
+    feature_cols = get_feature_columns(
+        df,
+        post_release=post_release,
+        use_game_age=use_game_age,
+        use_release_year=use_release_year,
+    )
     X_train_raw, X_val_raw, X_test_raw, y_train, y_val, y_test = split_data(
         df, feature_cols, target_col=target_col
     )
