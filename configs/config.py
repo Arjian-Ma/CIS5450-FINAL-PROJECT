@@ -53,6 +53,9 @@ POST_RELEASE_FEATURES = [
     "Median playtime forever",
     "Median playtime two weeks",
     "Peak CCU",
+    "reviewScore",
+    "Metacritic score",
+    "has_metacritic",
     "estimated_owners_midpoint",   # Kaggle range estimate, also post-release
     "reviewScore",                 # Gamalytic review score, post-release
     "Metacritic score",            # Metacritic score, post-release

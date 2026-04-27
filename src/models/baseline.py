@@ -29,7 +29,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Lasso, LinearRegression, Ridge
+import statsmodels.api as sm
+from sklearn.linear_model import Lasso, Ridge
 
 from configs.config import LASSO_ALPHA, RANDOM_STATE, RIDGE_ALPHA
 from src.evaluation.metrics import evaluate_predictions
@@ -92,13 +93,62 @@ def make_mean_predictor() -> BaselineModel:
     return BaselineModel(name="MeanPredictor", model=_MeanEstimator())
 
 
-# ── OLS linear regression ─────────────────────────────────────────────────────
+# ── OLS linear regression (statsmodels) ──────────────────────────────────────
+
+class _StatsmodelsOLS:
+    """
+    statsmodels OLS wrapper with sklearn-compatible fit/predict interface.
+    Stores the full summary (coefficients, p-values, R², F-stat, etc.)
+    on self.results after fitting.
+    """
+
+    def fit(self, X, y):
+        X_sm = sm.add_constant(X, has_constant="add")
+        self.results = sm.OLS(y, X_sm).fit()
+        return self
+
+    def predict(self, X):
+        X_sm = sm.add_constant(X, has_constant="add")
+        return self.results.predict(X_sm)
+
 
 def make_linear_regression() -> BaselineModel:
     return BaselineModel(
         name="LinearRegression",
-        model=LinearRegression(n_jobs=-1),
+        model=_StatsmodelsOLS(),
     )
+
+
+def ols_summary(
+    lr_model: BaselineModel,
+    feature_names: list[str],
+) -> pd.DataFrame:
+    """
+    Return a tidy DataFrame with OLS coefficients, std errors, t-stats,
+    p-values, and 95 % confidence intervals for every feature.
+
+    Parameters
+    ----------
+    lr_model      : fitted BaselineModel whose inner model is _StatsmodelsOLS
+    feature_names : list from data["output_cols"]
+
+    Returns
+    -------
+    DataFrame sorted by ascending p-value.
+    """
+    res = lr_model.model.results
+    names = ["const"] + list(feature_names[: len(res.params) - 1])
+    ci = res.conf_int()
+    df = pd.DataFrame({
+        "feature":   names,
+        "coef":      res.params.values,
+        "std_err":   res.bse.values,
+        "t_stat":    res.tvalues.values,
+        "p_value":   res.pvalues.values,
+        "ci_low":    ci.iloc[:, 0].values,
+        "ci_high":   ci.iloc[:, 1].values,
+    }).sort_values("p_value").reset_index(drop=True)
+    return df
 
 
 # ── Ridge regression ──────────────────────────────────────────────────────────
